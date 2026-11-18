@@ -40,6 +40,7 @@
 
 #include "can_sja1000.h"
 #include "qom/object.h"
+#include "arbiter_communication.h"
 
 #define TYPE_CAN_PCI_DEV "kvaser_pci"
 
@@ -166,7 +167,7 @@ static void kvaser_pci_sja_io_write(void *opaque, hwaddr addr, uint64_t data,
     if (addr >= KVASER_PCI_BYTES_PER_SJA) {
         return;
     }
-
+    CAN_LOG("kvaser write");
     can_sja_mem_write(s, addr, data, size);
 }
 

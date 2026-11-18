@@ -45,6 +45,7 @@
 
 #define ARBITER_SOCKET_PATH "/tmp/can-arbiter.sock"
 
+
 #define DPRINTF(fmt, ...) \
     do { \
         if (DEBUG_CAN) { \
@@ -53,7 +54,10 @@
     } while (0)
 
 static int can_send_to_arbiter(qemu_can_frame frame,
-                               ArbiterResponse *response); 
+                               ArbiterResponse *response, CanSJA1000State *s);
+
+
+static int can_arbiter_connect(CanSJA1000State *s);
 
 static void can_sja_software_reset(CanSJA1000State *s)
 {
@@ -425,71 +429,155 @@ static void can_sja_update_bas_irq(CanSJA1000State *s)
     }
 }
 
+
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/socket.h>
+
+#include <time.h>
+#include <stdint.h>
+#include <stdio.h>
+
+
+
+
+
+#define CAN_DEBUG_LOG "/tmp/can-arbiter-debug.log"
+
+#include <stdio.h>
+#include <stdint.h>
+#include <time.h>
+
+#include <stdio.h>
+#include <stdint.h>
+#include <time.h>
+#include <inttypes.h>
+
 static int can_send_to_arbiter(qemu_can_frame frame,
-                               ArbiterResponse *response)
+                               ArbiterResponse *response,
+                               CanSJA1000State *s)
 {
-    int fd;
-    struct sockaddr_un addr;
+    unsigned int len = frame.can_dlc;
+    if (len > 64)
+        len = 64;
 
-    /* Socket erstellen */
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    CAN_LOG("PERF TEST A: CAN_LOG first call");
+    CAN_LOG("PERF TEST B: CAN_LOG second call");
 
-    if (fd < 0) {
+    CAN_LOG("TX: before send()");
+    CAN_LOG("TX: before send() confirmation");
+
+    ssize_t sent;
+
+    do {
+        sent = send(s->arbiter_fd, &frame, sizeof(frame), 0);
+    } while (sent < 0 && errno == EINTR);
+
+    CAN_LOG("TX: after send(), sent=%zd", sent);
+    CAN_LOG("TX: after send() confirmation, sent=%zd", sent);
+
+    if (sent != sizeof(frame)) {
+        CAN_LOG("TX ERROR: send failed: %s",
+                sent < 0 ? strerror(errno) : "incomplete packet");
+        CAN_LOG("TX ERROR: send failed confirmation");
+
+        close(s->arbiter_fd);
+        s->arbiter_fd = -1;
         return -1;
     }
 
-    /* Socket-Adresse initialisieren */
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
+    CAN_LOG("RX: before blocking recv()");
+    CAN_LOG("RX: before blocking recv() confirmation");
 
-    strncpy(addr.sun_path,
-            ARBITER_SOCKET_PATH,
-            sizeof(addr.sun_path) - 1);
+    ssize_t received;
 
-    /* Verbindung zum Arbiter herstellen */
-    if (connect(fd,
-                (struct sockaddr *)&addr,
-                sizeof(addr)) < 0) {
-        close(fd);
+    do {
+        received = recv(
+            s->arbiter_fd,
+            response,
+            sizeof(*response),
+            MSG_TRUNC
+        );
+    } while (received < 0 && errno == EINTR);
+
+    CAN_LOG("RX: after recv(), received=%zd", received);
+    CAN_LOG("RX: after recv() confirmation, received=%zd", received);
+
+    if (received <= 0 || (size_t)received != sizeof(*response)) {
+        CAN_LOG("RX ERROR: %s",
+                received < 0 ? strerror(errno) :
+                received == 0 ? "connection closed" :
+                "invalid response packet size");
+        CAN_LOG("RX ERROR: confirmation");
+
+        close(s->arbiter_fd);
+        s->arbiter_fd = -1;
         return -1;
     }
 
-    /* CAN-Frame vollständig übertragen */
-    size_t sent = 0;
+    CAN_LOG("FUNCTION: before return");
+    CAN_LOG("FUNCTION: before return confirmation");
 
-    while (sent < sizeof(frame)) {
-        ssize_t n = send(fd,
-                         (uint8_t *)&frame + sent,
-                         sizeof(frame) - sent,
-                         0);
+    return 0;
+}
 
-        if (n <= 0) {
-            close(fd);
-            return -1;
-        }
+static int can_notify_arbiter_tx_complete(CanSJA1000State *s)
+{
+    ArbiterMessage msg = {
+        .type = ARBITER_MSG_TX_COMPLETE
+    };
 
-        sent += n;
+    // CAN_LOG("========================================");
+    // CAN_LOG("TX_COMPLETE: function called");
+    // CAN_LOG("TX_COMPLETE: arbiter_fd=%d", s->arbiter_fd);
+    // CAN_LOG("TX_COMPLETE: sizeof(msg)=%zu", sizeof(msg));
+    // CAN_LOG("TX_COMPLETE: message type=%d", msg.type);
+
+    if (s->arbiter_fd < 0) {
+        // CAN_LOG("TX_COMPLETE ERROR: invalid arbiter_fd");
+        return -1;
     }
 
-    /* Antwort vollständig empfangen */
-    size_t received = 0;
+    /* Nachricht als SOCK_SEQPACKET senden */
+    ssize_t n;
 
-    while (received < sizeof(*response)) {
-        ssize_t n = recv(fd,
-                         (uint8_t *)response + received,
-                         sizeof(*response) - received,
-                         0);
+    do {
+        // CAN_LOG("TX_COMPLETE: calling send()");
 
-        if (n <= 0) {
-            close(fd);
-            return -1;
-        }
+        n = send(s->arbiter_fd,
+                 &msg,
+                 sizeof(msg),
+                 MSG_NOSIGNAL);
 
-        received += n;
+    } while (n < 0 && errno == EINTR);
+
+    // CAN_LOG("TX_COMPLETE: send returned %zd", n);
+
+    if (n < 0) {
+        // CAN_LOG("TX_COMPLETE ERROR: send failed: %s",
+        //         strerror(errno));
+        return -1;
     }
 
-    /* Socket schließen */
-    close(fd);
+    if (n != sizeof(msg)) {
+        // CAN_LOG("TX_COMPLETE ERROR: invalid sent size: %zd (expected %zu)",
+        //         n, sizeof(msg));
+        return -1;
+    }
+
+    // CAN_LOG("TX_COMPLETE: successfully sent %zd bytes", n);
+
+    /* Gesendete Bytes ausgeben */
+    // uint8_t *p = (uint8_t *)&msg;
+
+    // CAN_LOG("TX_COMPLETE DATA: %02X %02X %02X %02X",
+    //         p[0], p[1], p[2], p[3]);
+
+    CAN_LOG("TX_COMPLETE: send finished");
+    // CAN_LOG("========================================");
 
     return 0;
 }
@@ -554,12 +642,12 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
 
                 ArbiterResponse response;
 
-                if (can_send_to_arbiter(frame, &response) == 0) {
+                if (can_send_to_arbiter(frame, &response, s) == 0) {
 
-                    printf("Bus Bit: %u\n", response.bus_bit);
 
                     if (response.arbitration_lost) {
                         printf("Arbitration verloren!\n");
+                        return;
                     }
                 }
 
@@ -575,7 +663,7 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
                 s->status_pel &= ~(3 << 2);
 
                 can_bus_client_send(&s->bus_client, &frame, 1);
-
+                can_notify_arbiter_tx_complete(s);
                 /*
                  * Set transmission complete status
                  * and Transmit Buffer Status.
@@ -586,6 +674,8 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
                 s->status_pel &= ~(1 << 5);
                 s->interrupt_pel |= 0x02;
                 can_sja_update_pel_irq(s);
+
+                
             }
             if (0x04 & val) { /* Release Receive Buffer */
                 if (s->rxmsg_cnt <= 0) {
@@ -670,15 +760,14 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
 
                 ArbiterResponse response;
 
-                if (can_send_to_arbiter(frame, &response) == 0) {
+                if (can_send_to_arbiter(frame, &response, s) == 0) {
 
-                    printf("Bus Bit: %u\n", response.bus_bit);
 
                     if (response.arbitration_lost) {
                         printf("Arbitration verloren!\n");
+                        return;
                     }
                 }
-
 
                 if (DEBUG_FILTER) {
                     can_display_msg("[cansja]: Tx request " , &frame);
@@ -692,7 +781,7 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
 
                 /* write to the backends. */
                 can_bus_client_send(&s->bus_client, &frame, 1);
-
+                can_notify_arbiter_tx_complete(s);
                 /*
                  * Set transmission complete status,
                  * and Transmit Buffer Status.
@@ -703,6 +792,7 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
                 s->status_bas &= ~(1 << 5);
                 s->interrupt_bas |= 0x02;
                 can_sja_update_bas_irq(s);
+                
             }
             if (0x04 & val) { /* Release Receive Buffer */
                 if (s->rxmsg_cnt <= 0) {
@@ -1011,6 +1101,12 @@ int can_sja_connect_to_bus(CanSJA1000State *s, CanBusState *bus)
 void can_sja_disconnect(CanSJA1000State *s)
 {
     can_bus_remove_client(&s->bus_client);
+
+    /* Verbindung zum CAN-Arbiter schließen */
+    if (s->arbiter_fd >= 0) {
+        close(s->arbiter_fd);
+        s->arbiter_fd = -1;
+    }
 }
 
 int can_sja_init(CanSJA1000State *s, qemu_irq irq)
@@ -1021,7 +1117,51 @@ int can_sja_init(CanSJA1000State *s, qemu_irq irq)
 
     can_sja_hardware_reset(s);
 
+    can_arbiter_connect(s);
+
     return 0;
+}
+
+static int can_arbiter_connect(CanSJA1000State *s) {
+
+    struct sockaddr_un addr;
+
+    /* Socket erstellen */
+    s->arbiter_fd = -1;
+
+    s->arbiter_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+
+    if (s->arbiter_fd < 0) {
+        return -1;
+    }
+
+    /* Socket-Adresse initialisieren */
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+
+    if (strlen(ARBITER_SOCKET_PATH) >= sizeof(addr.sun_path)) {
+        goto error;
+    }
+
+    strncpy(addr.sun_path,
+            ARBITER_SOCKET_PATH,
+            sizeof(addr.sun_path) - 1);
+
+    /* Verbindung zum Arbiter herstellen */
+    if (connect(s->arbiter_fd,
+                (struct sockaddr *)&addr,
+                sizeof(addr)) < 0) {
+        close(s->arbiter_fd);
+        return -1;
+    }
+
+    return 0;
+
+    error:
+        close(s->arbiter_fd);
+        s->arbiter_fd = -1;
+
+        return -1;
 }
 
 const VMStateDescription vmstate_qemu_can_filter = {

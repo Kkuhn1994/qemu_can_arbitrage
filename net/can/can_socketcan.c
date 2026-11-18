@@ -42,6 +42,8 @@
 #include <linux/can/raw.h>
 #include "qom/object.h"
 
+#include "../../hw/net/can/arbiter_communication.h"
+
 #ifndef DEBUG_CAN
 #define DEBUG_CAN 0
 #endif /*DEBUG_CAN*/
@@ -98,6 +100,7 @@ static void can_host_socketcan_read(void *opaque)
     CanHostSocketCAN *c = opaque;
     CanHostState *ch = CAN_HOST(c);
 
+    CAN_LOG("socketcan_read");
     /* CAN_READ_BUF_LEN for multiple messages syscall is possible for future */
     c->bufcnt = read(c->fd, c->buf, sizeof(qemu_can_frame));
     if (c->bufcnt < 0) {
@@ -130,6 +133,8 @@ static ssize_t can_host_socketcan_receive(CanBusClientState *client,
 {
     CanHostState *ch = container_of(client, CanHostState, bus_client);
     CanHostSocketCAN *c = CAN_HOST_SOCKETCAN(ch);
+
+    CAN_LOG("socketcan_receive");
 
     size_t len;
     int res;

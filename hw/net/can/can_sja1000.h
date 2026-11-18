@@ -64,6 +64,9 @@ typedef struct CanSJA1000State {
     uint8_t         code;          /* 4 .. Acceptance code register */
     uint8_t         mask;          /* 5 .. Acceptance mask register */
 
+    int arbiter_fd;
+    uint32_t instance_id;
+
     qemu_can_filter filter[4];
 
     qemu_irq          irq;
